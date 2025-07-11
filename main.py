@@ -68,17 +68,28 @@ def analyze_images(image_paths):
 
 
 def main():
+    chrome_path = os.path.join(os.path.dirname(__file__), "chromedriver.exe")
+
+    if not os.path.exists(chrome_path):
+        print(f"[❌] chromedriver.exe не найден по пути: {chrome_path}")
+        return
+    else:
+        print(f"[✓] Используется chromedriver по пути: {chrome_path}")
+
     options = webdriver.ChromeOptions()
-    # options.add_argument('--headless')  # включи, если не хочешь видеть окно
-    driver = webdriver.Chrome(service=Service(), options=options)
+    # options.add_argument('--headless')  # если хочешь скрыть окно браузера
+
+    service = Service(executable_path=chrome_path)
+    driver = webdriver.Chrome(service=service, options=options)
 
     image_paths = download_captcha_images(driver)
-    driver.quit()
-
     if image_paths:
         analyze_images(image_paths)
     else:
         print("[!] Не найдено изображений для анализа")
+
+    input("[⏸] Нажмите Enter, чтобы закрыть окно браузера...")
+    driver.quit()
 
 
 if __name__ == "__main__":
