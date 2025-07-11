@@ -1,27 +1,38 @@
+import hashlib
+import os
+import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from transformers import BlipProcessor, BlipForConditionalGeneration
-from PIL import Image
-import base64
-import os
-import time
-import requests
-import torch
-import requests
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 URL = "https://www.humansnotinvited.com/"
 SAVE_DIR = "captcha_images"
+DB_FILE = "db.txt"
+
 os.makedirs(SAVE_DIR, exist_ok=True)
+
+
+def load_db(path=DB_FILE):
+    db = {}
+    with open(path, 'r') as f:
+        for line in f:
+            md5_hash, category = line.strip().split(';')
+            db[md5_hash] = category
+    return db
+
+
+def get_md5(file_path):
+    with open(file_path, 'rb') as f:
+        content = f.read()
+    return hashlib.md5(content).hexdigest()
 
 
 def download_captcha_images(driver):
     driver.get(URL)
-
     try:
         print("[*] Ожидание появления изображений...")
         WebDriverWait(driver, 15).until(
@@ -51,83 +62,40 @@ def download_captcha_images(driver):
     return image_paths
 
 
-def click_matching_tiles(driver, task_keyword, image_captions):
-    print(f"[*] Кликаю по картинкам с '{task_keyword}'...")
-    # На странице в .captcha-image лежат div'ы с картинками
-    captcha_images = driver.find_elements(By.CSS_SELECTOR, ".captcha-image")
-
-    for idx, caption in enumerate(image_captions):
-        if task_keyword.lower() in caption.lower():
-            print(f"[✓] Кликаю по tile_{idx}.png → {caption}")
-            captcha_images[idx].click()
-        else:
-            print(f"[✗] Не кликаю по tile_{idx}.png → {caption}")
-
-
-# В analyze_images нужно вернуть captions, чтобы потом использовать
-def analyze_images(image_paths):
-    print("\n[*] Анализ изображений...")
-
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
-
-    captions = []
-    for path in image_paths:
-        image = Image.open(path).convert("RGB")
-        inputs = processor(images=image, return_tensors="pt").to(device)
-        out = model.generate(**inputs)
-        caption = processor.decode(out[0], skip_special_tokens=True)
-        captions.append(caption)
-        print(f"[📷] {os.path.basename(path)}: {caption}")
-    return captions
-
-def solve_captcha(driver, image_paths):
-    print("\n[*] Начинаю решение капчи...")
-
-    # Шаг 1: Извлекаем задание
+def solve_captcha_with_db(driver, db):
+    # Получаем текст задания
     task_element = driver.find_element(By.CSS_SELECTOR, ".header strong")
     task_keyword = task_element.text.lower().strip()
     print(f"[🎯] Задание: выбрать все с «{task_keyword}»")
 
-    # Шаг 2: Загружаем модель и процессор
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
+    # Скачиваем картинки капчи
+    image_paths = download_captcha_images(driver)
+    if not image_paths:
+        print("[!] Не найдено изображений для анализа")
+        return
 
-    # Шаг 3: Анализируем изображения
-    captions = []
-    for path in image_paths:
-        image = Image.open(path).convert("RGB")
-        inputs = processor(images=image, return_tensors="pt").to(device)
-        out = model.generate(**inputs)
-        caption = processor.decode(out[0], skip_special_tokens=True)
-        captions.append(caption)
-
-    # Шаг 4: Выбираем подходящие
-    selected_indices = []
-    for idx, caption in enumerate(captions):
-        if task_keyword in caption.lower():
-            selected_indices.append(idx)
-            print(f"[✓] Подходит: tile_{idx}.png → {caption}")
-        else:
-            print(f"[✗] Не подходит: tile_{idx}.png → {caption}")
-
-    # Шаг 5: Кликаем по нужным
+    # Находим все div с картинками (чтобы кликать)
     image_divs = driver.find_elements(By.CLASS_NAME, "captcha-image")
-    for idx in selected_indices:
-        try:
-            image_divs[idx].click()
-            print(f"[🖱️] Клик по изображению tile_{idx}.png")
-        except IndexError:
-            print(f"[!] Не найден элемент для индекса {idx}")
 
-    # Шаг 6: Кликаем на кнопку "Verify"
-    verify_button = driver.find_element(By.CLASS_NAME, "button")
+    # Для каждой картинки считаем md5 и смотрим в базе
+    for idx, path in enumerate(image_paths):
+        md5_hash = get_md5(path)
+        category = db.get(md5_hash, None)
+        if category == task_keyword:
+            print(f"[✓] Подходит: tile_{idx}.png (категория: {category})")
+            try:
+                image_divs[idx].click()
+                print(f"[🖱️] Клик по tile_{idx}.png")
+            except IndexError:
+                print(f"[!] Элемент для tile_{idx}.png не найден")
+        else:
+            print(f"[✗] Не подходит: tile_{idx}.png (категория: {category})")
+
+    # Нажать Verify
+    verify_button = driver.find_element(By.CSS_SELECTOR, ".button")
     verify_button.click()
     print("[🚀] Нажата кнопка Verify")
+
 
 def main():
     chrome_path = os.path.join(os.path.dirname(__file__), "chromedriver.exe")
@@ -144,18 +112,13 @@ def main():
     service = Service(executable_path=chrome_path)
     driver = webdriver.Chrome(service=service, options=options)
 
-    image_paths = download_captcha_images(driver)
-    if image_paths:
-        captions = analyze_images(image_paths)
-        task_keyword = "cars"  # можно парсить с сайта, если хочешь
-        click_matching_tiles(driver, task_keyword, captions)
-    else:
-        print("[!] Не найдено изображений для анализа")
+    db = load_db()
 
-    # Нажать кнопку Verify после кликов
-    verify_button = driver.find_element(By.CSS_SELECTOR, ".button")
-    print("[🚀] Нажата кнопка Verify")
-    verify_button.click()
+    driver.get(URL)
+    WebDriverWait(driver, 15).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, ".header strong"))
+    )
+    solve_captcha_with_db(driver, db)
 
     input("[⏸] Нажмите Enter, чтобы закрыть окно браузера...")
     driver.quit()
